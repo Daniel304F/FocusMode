@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>FocusMode</title>
+    <style>
+      :root {
+        --bg-color: #f3f4f6;
+        --card-bg: #ffffff;
+        --text-main: #1f2937;
+        --text-muted: #6b7280;
+
+        --primary: #4f46e5;
+        --primary-hover: #4338ca;
+
+        --secondary: #f3f4f6;
+        --secondary-text: #374151;
+        --secondary-hover: #e5e7eb;
+
+        --accent-red: #ef4444;
+        --accent-red-bg: #fee2e2;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        width: 320px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        background-color: var(--bg-color);
+        color: var(--text-main);
+        margin: 0;
+        padding: 16px;
+      }
+
+      .card {
+        background: var(--card-bg);
+        border-radius: 12px;
+        padding: 16px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
+        margin-bottom: 16px;
+        border: 1px solid rgba(0, 0, 0, 0.03);
+      }
+
+      h2 {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 0 0 12px 0;
+        color: #111827;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      p.hint {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin: 0 0 16px 0;
+        line-height: 1.4;
+      }
+
+      .input-group {
+        display: flex;
+        gap: 8px;
+      }
+
+      input[type="text"] {
+        flex-grow: 1;
+        padding: 8px 12px;
+        border: 1px solid #e5e7eb;
+        border-radius: 6px;
+        font-size: 13px;
+        outline: none;
+        background: #f9fafb;
+        color: #374151;
+        transition: all 0.2s;
+      }
+      input[type="text"]:focus {
+        background: #fff;
+        border-color: var(--primary);
+        box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1);
+      }
+
+      button {
+        cursor: pointer;
+        font-weight: 500;
+        border: none;
+        border-radius: 6px;
+        transition: all 0.2s ease;
+        font-size: 13px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+      }
+
+      #addBtn {
+        background-color: var(--primary);
+        color: white;
+        padding: 0 14px;
+      }
+      #addBtn:hover {
+        background-color: var(--primary-hover);
+      }
+
+      #picker-btn {
+        width: 100%;
+        padding: 10px;
+        background-color: var(--primary);
+        color: white;
+        font-size: 13px;
+        margin-bottom: 12px;
+        box-shadow: 0 1px 2px rgba(79, 70, 229, 0.2);
+      }
+      #picker-btn:hover {
+        background-color: var(--primary-hover);
+        transform: translateY(-1px);
+      }
+      .action-row {
+        display: flex;
+        gap: 8px;
+      }
+
+      #manage-btn {
+        flex: 1;
+        padding: 8px;
+        background-color: var(--secondary);
+        color: var(--secondary-text);
+        border: 1px solid transparent;
+      }
+      #manage-btn:hover {
+        background-color: var(--secondary-hover);
+        color: #111827;
+      }
+
+      #reset-all-btn {
+        flex: 1;
+        padding: 8px;
+        background-color: transparent;
+        color: var(--text-muted);
+        border: 1px dashed #d1d5db;
+      }
+      #reset-all-btn:hover {
+        background-color: var(--accent-red-bg);
+        color: var(--accent-red);
+        border-color: var(--accent-red);
+      }
+
+      ul {
+        list-style: none;
+        padding: 0;
+        margin: 12px 0 0 0;
+      }
+
+      li {
+        background: #fff;
+        margin-bottom: 6px;
+        padding: 6px 10px;
+        border-radius: 5px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 13px;
+        border: 1px solid #f3f4f6;
+        color: #4b5563;
+      }
+
+      .remove-btn {
+        background: transparent;
+        color: #9ca3af;
+        font-size: 14px;
+        width: 20px;
+        height: 20px;
+        padding: 0;
+        border-radius: 4px;
+      }
+      .remove-btn:hover {
+        background: var(--accent-red-bg);
+        color: var(--accent-red);
+      }
+      .autocomplete-container {
+        position: relative;
+        flex-grow: 1;
+      }
+
+      .autocomplete-items {
+        position: absolute;
+        border: 1px solid #e5e7eb;
+        border-top: none;
+        z-index: 99;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background-color: white;
+        border-radius: 0 0 8px 8px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        max-height: 150px;
+        overflow-y: auto;
+      }
+
+      .autocomplete-items div {
+        padding: 10px;
+        cursor: pointer;
+        font-size: 13px;
+        color: #374151;
+        border-bottom: 1px solid #f3f4f6;
+      }
+
+      .autocomplete-items div:last-child {
+        border-bottom: none;
+      }
+
+      .autocomplete-items div:hover {
+        background-color: #f9fafb;
+      }
+      .autocomplete-active {
+        background-color: var(--primary) !important;
+        color: #ffffff !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2><span style="color: #ef4444">⛔</span> Site Blocker</h2>
+      <div class="input-group">
+        <div class="autocomplete-container">
+          <input
+            type="text"
+            id="siteInput"
+            placeholder="z.B. facebook.com"
+            autocomplete="off"
+          />
+        </div>
+        <button id="addBtn">Add</button>
+      </div>
+      <ul id="blockList"></ul>
+    </div>
+
+    <div class="card">
+      <h2><span style="color: var(--primary)">👁️</span> Focus Mode</h2>
+      <p class="hint">Verstecke ablenkende Elemente auf dieser Seite.</p>
+
+      <button id="picker-btn"><span>➕</span> Neues Element verstecken</button>
+
+      <div class="action-row">
+        <button id="manage-btn">✏️ Verwalten</button>
+
+        <button id="reset-all-btn">↺ Reset</button>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

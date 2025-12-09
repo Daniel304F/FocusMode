@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "FocusMode - Blocker & Hider",
+  "version": "1.0",
+  "description": "Blockiere Seiten und verstecke störende Elemente.",
+  "permissions": ["storage", "tabs", "activeTab", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "focus.svg"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"]
+    }
+  ]
+}

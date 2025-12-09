@@ -2,8 +2,6 @@
 
 Eine moderne Browser-Erweiterung für Chrome, Edge und Brave, die dir hilft, produktiv zu bleiben.
 
-![FocusMode Icon](icon.svg)
-
 ## Funktionen
 
 * **🚫 Site Blocker:** Blockiere ablenkende Webseiten (mit Autocomplete-Vorschlägen für Top-Seiten).

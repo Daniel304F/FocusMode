@@ -29,6 +29,26 @@ Da diese Erweiterung noch nicht im Chrome Web Store gelistet ist, kannst du sie 
 2.  **Webseite blockieren:** Tippe z.B. `reddit` ein, wähle den Vorschlag und drücke Enter.
 3.  **Elemente verstecken:** Gehe auf eine Seite, öffne das Popup und klicke auf "Neues Element verstecken". Klicke dann auf das Element auf der Webseite.
 
+## Architektur & Tests
+
+Die fachlichen Anforderungen sind in [ANFORDERUNGEN.md](ANFORDERUNGEN.md)
+beschrieben; jede Fachregel trägt dort eine ID (z. B. `B-4`, `P-3`), und eine
+Tabelle ordnet die Regeln den Fachmodulen und Testdateien zu.
+
+* `src/core/` — **Fachkern**: reine, browserfreie Module (Blockliste,
+  Tracking, Statistik, Pomodoro-Zustandsmaschine, Empfehlungen, …).
+* `background.js` — Service-Worker-**Adapter**: Browser-Ereignisse, Alarme,
+  Storage; Fachregeln werden aus `src/core/` bezogen.
+* `src/ui/` + `src/lib/` — Popup-Oberfläche und Präsentationshelfer.
+* `content.js` — Content-Script (Element-Hider); bewusst eigenständig, da
+  Content-Scripts keine ES-Module laden können.
+
+Fachliche Tests (Node-Testrunner, keine Abhängigkeiten):
+
+```bash
+npm test
+```
+
 ## Datenschutz
 
 Diese Erweiterung läuft **100% lokal**.

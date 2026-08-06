@@ -1,6 +1,7 @@
-/** Statistics tab: overview boxes, top-sites bar chart, 7-day column chart. */
+/** Statistics tab: overview tiles, top sites bars, seven day chart. */
 import { state } from "../state.js";
 import { escapeHtml, formatDuration } from "../lib/format.js";
+import { sortPageStats, liveTotalMs } from "../core/statistics.js";
 
 let _sortField = "totalMs"; // "totalMs" | "visits"
 let _sortDir = "desc";      // "desc" | "asc"
@@ -31,18 +32,17 @@ export function renderStats() {
 
 export function renderLiveTimer() {
   if (!state.currentHostname) return;
-  let total = Number(state.currentHostStats?.totalMs || 0);
-  if (
-    state.activeSession?.hostname === state.currentHostname &&
-    state.activeSession.startedAt
-  ) {
-    total += Math.max(0, Date.now() - Number(state.activeSession.startedAt));
-  }
+  // Stored total plus the running session of the active domain.
+  const total = liveTotalMs(
+    state.currentHostStats?.totalMs,
+    state.activeSession,
+    state.currentHostname
+  );
   const el = document.getElementById("currentHostTimeValue");
   if (el) el.textContent = formatDuration(total);
 }
 
-// ── private ───────────────────────────────────────────────────────────────────
+// private
 
 function _renderOverview() {
   const setVal = (id, text) => {
@@ -67,11 +67,8 @@ function _renderTopSites() {
     return;
   }
 
-  const sorted = [...state.pageStatsTop].sort((a, b) => {
-    const va = _sortField === "visits" ? (a.visits || 0) : (a.totalMs || 0);
-    const vb = _sortField === "visits" ? (b.visits || 0) : (b.totalMs || 0);
-    return _sortDir === "desc" ? vb - va : va - vb;
-  });
+  // Sorting by time or visits is computed by the domain core.
+  const sorted = sortPageStats(state.pageStatsTop, _sortField, _sortDir);
 
   const top = sorted.slice(0, 5);
   // Max is always computed from time for bar width, regardless of sort field

@@ -1,4 +1,4 @@
-/** Sidebar navigation — switches active page panel. */
+/** Sidebar navigation: switches the active page panel. */
 
 export function showPage(pageId) {
   document.querySelectorAll(".nav-btn").forEach((btn) => {

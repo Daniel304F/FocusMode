@@ -1,10 +1,41 @@
+/**
+ * Background service worker. Acts as the adapter between browser events and
+ * the domain core in src/core. Runs as an ES module (manifest "type": "module").
+ *
+ * Responsibilities (orchestration only, no domain rules):
+ *   session lifecycle driven by tab and window events,
+ *   enforcement of the blocklist while a page loads,
+ *   alarms for periodic flushing, recommendation refresh and pomodoro expiry,
+ *   persistence in chrome.storage.local and the optional tracker server,
+ *   the message API used by the popup.
+ */
+import {
+  parseHostname,
+  normalizeSite,
+  isBlockedBy,
+  isTrackableUrl,
+} from "./src/core/site.js";
+import {
+  closeSession,
+  isSignificantSession,
+  applySessionToPageStats,
+  prependRecentSession,
+  isResumableSession,
+  MAX_PENDING_SESSIONS,
+} from "./src/core/tracking.js";
+import {
+  buildInterestKeywords,
+  buildExclusionSet,
+  selectRecommendations,
+  needsRefresh,
+  MAX_RECOMMENDATIONS,
+} from "./src/core/recommendations.js";
+import * as pomodoro from "./src/core/pomodoro.js";
+
 const TRACKER_DEFAULT_BASE_URL = "http://127.0.0.1:4545";
 const FLUSH_ALARM = "focusmode-flush";
 const RECOMMENDATIONS_ALARM = "focusmode-recommendations";
 const POMODORO_ALARM = "focusmode-pomodoro";
-const MIN_SESSION_MS = 2000;
-const MAX_RECENT_SESSIONS = 200;
-const MAX_RECOMMENDATIONS = 24;
 const ACTIVE_SESSION_KEY = "activeSessionState";
 
 let activeSession = null;
@@ -37,7 +68,6 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === RECOMMENDATIONS_ALARM) {
     refreshRecommendations(false);
   }
-
   if (alarm.name === POMODORO_ALARM) {
     handlePomodoroAlarm();
   }
@@ -47,7 +77,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === "loading" && tab.url) {
     maybeBlockTab(tabId, tab.url);
   }
-
   if (changeInfo.status === "complete" && tab.active) {
     setActiveSessionFromTab(tab, "tab-complete");
   }
@@ -55,9 +84,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   const tab = await getTab(activeInfo.tabId);
-  if (!tab) {
-    return;
-  }
+  if (!tab) return;
   setActiveSessionFromTab(tab, "tab-activated");
 });
 
@@ -67,125 +94,94 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
+// Losing focus of the browser window ends the running session.
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
     finalizeActiveSession("window-blur");
     return;
   }
-
   const [tab] = await queryTabs({ active: true, windowId });
-  if (tab) {
-    setActiveSessionFromTab(tab, "window-focus");
-  }
+  if (tab) setActiveSessionFromTab(tab, "window-focus");
 });
+
+// Message API used by the popup
+
+const messageHandlers = {
+  get_popup_data: (request) => getPopupData(request.hostname),
+  refresh_recommendations: () => refreshRecommendations(true),
+  ping_tracker: () => pingTracker(),
+  pomodoro_start: (request) => pomodoroTransition((s) => pomodoro.start(s, request.phase, request.settings, Date.now())),
+  pomodoro_stop: () => pomodoroTransition((s) => pomodoro.stop(s)),
+  pomodoro_pause: () => pomodoroTransition((s) => pomodoro.pause(s, Date.now())),
+  pomodoro_resume: () => pomodoroTransition((s) => pomodoro.resume(s, Date.now())),
+  record_manual_unhide: async (request) => {
+    if (request.hostname && request.selector) {
+      await recordUnhideEvent(request.hostname, request.selector);
+    }
+  },
+};
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (!request || !request.action) {
-    return;
-  }
+  const handler = request?.action && messageHandlers[request.action];
+  if (!handler) return;
 
-  if (request.action === "get_popup_data") {
-    getPopupData(request.hostname)
-      .then((data) => sendResponse({ ok: true, data }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (request.action === "refresh_recommendations") {
-    refreshRecommendations(true)
-      .then((items) => sendResponse({ ok: true, items }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (request.action === "ping_tracker") {
-    pingTracker()
-      .then((status) => sendResponse({ ok: true, status }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (request.action === "pomodoro_start") {
-    pomodoroStart(request.phase, request.settings)
-      .then((s) => sendResponse({ ok: true, state: s }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
-
-  if (request.action === "pomodoro_stop") {
-    pomodoroStop()
-      .then(() => sendResponse({ ok: true }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
-
-  if (request.action === "pomodoro_pause") {
-    pomodoroPause()
-      .then((s) => sendResponse({ ok: true, state: s }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
-
-  if (request.action === "pomodoro_resume") {
-    pomodoroResume()
-      .then((s) => sendResponse({ ok: true, state: s }))
-      .catch((e) => sendResponse({ ok: false, error: e.message }));
-    return true;
-  }
-
-  if (request.action === "record_manual_unhide") {
-    if (request.hostname && request.selector) {
-      recordUnhideEvent(request.hostname, request.selector);
-    }
-    sendResponse({ ok: true });
-    return true;
-  }
+  Promise.resolve(handler(request))
+    .then((result) => sendResponse(normalizeHandlerResult(request.action, result)))
+    .catch((error) => sendResponse({ ok: false, error: error.message }));
+  return true; // keep the channel open for the async response
 });
+
+/** Preserves the established response shape per action (data/items/status/state). */
+function normalizeHandlerResult(action, result) {
+  switch (action) {
+    case "get_popup_data": return { ok: true, data: result };
+    case "refresh_recommendations": return { ok: true, items: result };
+    case "ping_tracker": return { ok: true, status: result };
+    case "pomodoro_start":
+    case "pomodoro_pause":
+    case "pomodoro_resume": return { ok: true, state: result };
+    default: return { ok: true };
+  }
+}
 
 function ensureAlarms() {
   chrome.alarms.create(FLUSH_ALARM, { periodInMinutes: 1 });
   chrome.alarms.create(RECOMMENDATIONS_ALARM, { periodInMinutes: 180 });
 }
 
+// Blocklist enforcement
+
 async function maybeBlockTab(tabId, tabUrl) {
   const currentHost = parseHostname(tabUrl);
-  if (!currentHost) {
-    return;
-  }
+  if (!currentHost) return;
+
+  // Never redirect the blocked page itself.
+  if (tabUrl.startsWith(blockedPageUrl())) return;
 
   const data = await storageGet(["blockedSites"]);
-  const sites = data.blockedSites || [];
-  const isBlocked = sites.some((entry) => matchesBlockedHost(currentHost, entry));
+  if (!isBlockedBy(currentHost, data.blockedSites || [])) return;
 
-  if (!isBlocked) {
-    return;
-  }
-
-  if (tabUrl.startsWith(chrome.runtime.getURL("blocked.html"))) {
-    return;
-  }
-
-  chrome.tabs.update(tabId, {
-    url: chrome.runtime.getURL("blocked.html"),
-  });
+  chrome.tabs.update(tabId, { url: blockedPageUrl() });
 }
 
+function blockedPageUrl() {
+  return chrome.runtime.getURL("blocked.html");
+}
+
+// Session lifecycle
+
 async function setActiveSessionFromTab(tab, reason) {
-  if (!tab || !tab.url) {
-    return;
-  }
+  if (!tab || !tab.url) return;
 
   const host = parseHostname(tab.url);
-  if (!host || !shouldTrackUrl(tab.url)) {
+  // Internal pages and the blocked page are not trackable.
+  if (!host || !isTrackableUrl(tab.url, [blockedPageUrl()])) {
     await finalizeActiveSession(reason + "-untrackable");
     return;
   }
 
-  if (
-    activeSession &&
-    activeSession.tabId === tab.id &&
-    activeSession.hostname === host
-  ) {
+  // Same domain in the same tab: the session simply continues.
+  if (activeSession && activeSession.tabId === tab.id && activeSession.hostname === host) {
     activeSession.lastSeenAt = Date.now();
     await persistActiveSessionState();
     return;
@@ -206,91 +202,49 @@ async function setActiveSessionFromTab(tab, reason) {
 }
 
 async function finalizeActiveSession(reason) {
-  if (!activeSession) {
-    return;
-  }
+  if (!activeSession) return;
 
-  const now = Date.now();
-  const session = {
-    ...activeSession,
-    endedAt: now,
-    durationMs: Math.max(0, now - activeSession.startedAt),
-    reason,
-  };
-
+  const session = closeSession(activeSession, Date.now(), reason);
   activeSession = null;
   await storageSet({ [ACTIVE_SESSION_KEY]: null });
 
-  if (session.durationMs < MIN_SESSION_MS) {
-    return;
-  }
+  // Discard sessions below the minimum duration.
+  if (!isSignificantSession(session)) return;
 
   await persistSessionLocally(session);
   await enqueuePendingSession(session);
   flushPendingSessions();
 }
 
+/** Updates the per site statistics and prepends the session to the history. */
 async function persistSessionLocally(session) {
   const data = await storageGet(["pageStats", "recentSessions"]);
-  const pageStats = data.pageStats || {};
-  const recentSessions = data.recentSessions || [];
-
-  const existing = pageStats[session.hostname] || {
-    hostname: session.hostname,
-    totalMs: 0,
-    visits: 0,
-    lastVisitAt: 0,
-    lastUrl: session.url,
-    lastTitle: session.title || session.hostname,
-  };
-
-  existing.totalMs += session.durationMs;
-  existing.visits += 1;
-  existing.lastVisitAt = session.endedAt;
-  existing.lastUrl = session.url;
-  existing.lastTitle = session.title || existing.lastTitle;
-  pageStats[session.hostname] = existing;
-
-  recentSessions.unshift({
-    hostname: session.hostname,
-    url: session.url,
-    title: session.title || session.hostname,
-    startedAt: session.startedAt,
-    endedAt: session.endedAt,
-    durationMs: session.durationMs,
-  });
-
   await storageSet({
-    pageStats,
-    recentSessions: recentSessions.slice(0, MAX_RECENT_SESSIONS),
+    pageStats: applySessionToPageStats(data.pageStats || {}, session),
+    recentSessions: prependRecentSession(data.recentSessions || [], session),
   });
 }
+
+// Optional tracker server
 
 async function enqueuePendingSession(session) {
   const data = await storageGet(["pendingSessions"]);
   const pending = data.pendingSessions || [];
   pending.push(session);
-  await storageSet({ pendingSessions: pending.slice(-500) });
+  await storageSet({ pendingSessions: pending.slice(-MAX_PENDING_SESSIONS) });
 }
 
 async function flushPendingSessions() {
   const data = await storageGet(["pendingSessions", "trackerApiBase"]);
   const pending = data.pendingSessions || [];
-
-  if (pending.length === 0) {
-    return;
-  }
+  if (pending.length === 0) return;
 
   const trackerApiBase = sanitizeTrackerBase(data.trackerApiBase);
   const stillPending = [];
-
   for (const session of pending) {
     const ok = await postSessionToTracker(session, trackerApiBase);
-    if (!ok) {
-      stillPending.push(session);
-    }
+    if (!ok) stillPending.push(session);
   }
-
   await storageSet({ pendingSessions: stillPending });
 }
 
@@ -302,7 +256,7 @@ async function postSessionToTracker(session, trackerApiBase) {
       body: JSON.stringify(session),
     });
     return response.ok;
-  } catch (error) {
+  } catch {
     return false;
   }
 }
@@ -316,24 +270,24 @@ async function syncWithCurrentlyActiveTab() {
   await setActiveSessionFromTab(tab, "sync");
 }
 
+/** Resumes an open session after a restart unless it is orphaned. */
 async function hydrateActiveSession() {
   const data = await storageGet([ACTIVE_SESSION_KEY]);
   const stored = data[ACTIVE_SESSION_KEY];
-  if (!stored) {
-    return;
-  }
+  if (!stored) return;
 
-  if (Date.now() - stored.startedAt > 1000 * 60 * 60 * 12) {
+  if (!isResumableSession(stored, Date.now())) {
     await storageSet({ [ACTIVE_SESSION_KEY]: null });
     return;
   }
-
   activeSession = stored;
 }
 
 async function persistActiveSessionState() {
   await storageSet({ [ACTIVE_SESSION_KEY]: activeSession });
 }
+
+// Popup data
 
 async function getPopupData(hostname) {
   const data = await storageGet([
@@ -346,33 +300,24 @@ async function getPopupData(hostname) {
     "trackerApiBase",
   ]);
 
-  const blockedSites = (data.blockedSites || []).map((site) => normalizeSite(site));
-  const hiddenElements = data.hiddenElements || {};
   const pageStats = data.pageStats || {};
-  const favoriteSites = (data.favoriteSites || []).map((site) => normalizeSite(site));
-  const recommendations = data.siteRecommendations || {
-    updatedAt: 0,
-    items: [],
-  };
+  const hiddenElements = data.hiddenElements || {};
 
   const sortedStats = Object.values(pageStats)
     .sort((a, b) => b.totalMs - a.totalMs)
     .slice(0, 10);
-  const trackedSiteCount = Object.keys(pageStats).length;
 
-  const currentHostStats = hostname && pageStats[hostname] ? pageStats[hostname] : null;
-  const hiddenForCurrentHost = hostname ? hiddenElements[hostname] || [] : [];
   const trackerStatus = await pingTracker().catch(() => ({ online: false }));
 
   return {
-    blockedSites,
-    hiddenForCurrentHost,
+    blockedSites: (data.blockedSites || []).map(normalizeSite),
+    hiddenForCurrentHost: hostname ? hiddenElements[hostname] || [] : [],
     pageStatsTop: sortedStats,
-    trackedSiteCount,
-    currentHostStats,
+    trackedSiteCount: Object.keys(pageStats).length,
+    currentHostStats: (hostname && pageStats[hostname]) || null,
     recentSessions: (data.recentSessions || []).slice(0, 12),
-    favoriteSites,
-    recommendations,
+    favoriteSites: (data.favoriteSites || []).map(normalizeSite),
+    recommendations: data.siteRecommendations || { updatedAt: 0, items: [] },
     trackerStatus,
     trackerApiBase: sanitizeTrackerBase(data.trackerApiBase),
     activeSession,
@@ -385,9 +330,7 @@ async function pingTracker() {
 
   try {
     const response = await fetch(`${trackerApiBase}/api/health`);
-    if (!response.ok) {
-      return { online: false, baseUrl: trackerApiBase };
-    }
+    if (!response.ok) return { online: false, baseUrl: trackerApiBase };
     const json = await response.json();
     return {
       online: true,
@@ -395,10 +338,12 @@ async function pingTracker() {
       dbPath: json.dbPath || "",
       totalSessions: json.totalSessions || 0,
     };
-  } catch (error) {
+  } catch {
     return { online: false, baseUrl: trackerApiBase };
   }
 }
+
+// Recommendations
 
 async function refreshRecommendations(forceRefresh) {
   const data = await storageGet([
@@ -409,94 +354,40 @@ async function refreshRecommendations(forceRefresh) {
   ]);
 
   const existing = data.siteRecommendations || { updatedAt: 0, items: [] };
-  const needsRefresh =
-    forceRefresh || Date.now() - (existing.updatedAt || 0) > 1000 * 60 * 60 * 3;
-
-  if (!needsRefresh) {
+  // Only refresh when the stock is stale or a refresh was requested.
+  if (!forceRefresh && !needsRefresh(existing, Date.now())) {
     return existing.items || [];
   }
 
-  const pageStats = data.pageStats || {};
+  const visitedHosts = Object.keys(data.pageStats || {});
   const favoriteSites = data.favoriteSites || [];
-  const blockedSites = data.blockedSites || [];
-
-  const visitedHosts = Object.keys(pageStats);
   const interestKeywords = buildInterestKeywords(visitedHosts, favoriteSites);
 
-  if (interestKeywords.length === 0) {
-    await storageSet({
-      siteRecommendations: {
-        updatedAt: Date.now(),
-        items: [],
-      },
-    });
-    return [];
-  }
-
-  const excluded = new Set([
-    ...visitedHosts.map((s) => normalizeSite(s)),
-    ...favoriteSites.map((s) => normalizeSite(s)),
-    ...blockedSites.map((s) => normalizeSite(s)),
-  ]);
-
-  const recommendations = [];
-  const seenDomains = new Set();
-
-  for (const keyword of interestKeywords) {
-    const items = await fetchClearbitSuggestions(keyword);
-    for (const item of items) {
-      const domain = normalizeSite(item.domain);
-      if (!domain || excluded.has(domain) || seenDomains.has(domain)) {
-        continue;
-      }
-
-      seenDomains.add(domain);
-      recommendations.push({
-        domain,
-        name: item.name || domain,
-        logo: item.logo || "",
-        sourceKeyword: keyword,
-        score: recommendationScore(keyword, item),
-      });
-
-      if (recommendations.length >= MAX_RECOMMENDATIONS) {
-        break;
-      }
+  let finalItems = [];
+  if (interestKeywords.length > 0) {
+    // Adapter part: fetch candidates per keyword from the suggestion API,
+    // then let the domain core select and score them.
+    const keywordItems = [];
+    for (const keyword of interestKeywords) {
+      keywordItems.push({ keyword, items: await fetchClearbitSuggestions(keyword) });
     }
-
-    if (recommendations.length >= MAX_RECOMMENDATIONS) {
-      break;
-    }
+    const excluded = buildExclusionSet(visitedHosts, favoriteSites, data.blockedSites || []);
+    finalItems = selectRecommendations(keywordItems, excluded, MAX_RECOMMENDATIONS);
   }
-
-  recommendations.sort((a, b) => b.score - a.score);
-  const finalItems = recommendations.slice(0, MAX_RECOMMENDATIONS);
 
   await storageSet({
-    siteRecommendations: {
-      updatedAt: Date.now(),
-      items: finalItems,
-    },
+    siteRecommendations: { updatedAt: Date.now(), items: finalItems },
   });
-
   return finalItems;
 }
 
 async function fetchClearbitSuggestions(keyword) {
-  const url = `https://autocomplete.clearbit.com/v1/companies/suggest?query=${encodeURIComponent(
-    keyword
-  )}`;
-
+  const url = `https://autocomplete.clearbit.com/v1/companies/suggest?query=${encodeURIComponent(keyword)}`;
   try {
     const response = await fetch(url);
-    if (!response.ok) {
-      return [];
-    }
-
+    if (!response.ok) return [];
     const json = await response.json();
-    if (!Array.isArray(json)) {
-      return [];
-    }
+    if (!Array.isArray(json)) return [];
     return json
       .filter((entry) => entry && entry.domain)
       .map((entry) => ({
@@ -504,154 +395,65 @@ async function fetchClearbitSuggestions(keyword) {
         name: entry.name || "",
         logo: entry.logo || "",
       }));
-  } catch (error) {
+  } catch {
     return [];
   }
-}
-
-function buildInterestKeywords(visitedHosts, favoriteSites) {
-  const weightMap = new Map();
-  const upsert = (keyword, weight) => {
-    if (!keyword || keyword.length < 3) {
-      return;
-    }
-    const current = weightMap.get(keyword) || 0;
-    weightMap.set(keyword, current + weight);
-  };
-
-  for (const site of favoriteSites || []) {
-    for (const keyword of keywordsFromHost(site)) {
-      upsert(keyword, 4);
-    }
-  }
-
-  for (const site of visitedHosts || []) {
-    for (const keyword of keywordsFromHost(site)) {
-      upsert(keyword, 2);
-    }
-  }
-
-  return [...weightMap.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .map(([keyword]) => keyword)
-    .slice(0, 8);
-}
-
-function keywordsFromHost(hostname) {
-  const normalized = normalizeSite(hostname);
-  if (!normalized) {
-    return [];
-  }
-
-  const segments = normalized.replace(/^www\./, "").split(".");
-  const core =
-    segments.length >= 2 ? segments[segments.length - 2] : segments[0] || "";
-  const parts = core.split(/[-_]/).filter(Boolean);
-
-  const out = new Set([core]);
-  for (const part of parts) {
-    out.add(part);
-  }
-
-  return [...out].filter((token) => token.length >= 3);
-}
-
-function recommendationScore(keyword, item) {
-  const domain = (item.domain || "").toLowerCase();
-  const name = (item.name || "").toLowerCase();
-  let score = 0;
-
-  if (domain.includes(keyword)) {
-    score += 2;
-  }
-  if (name.includes(keyword)) {
-    score += 2;
-  }
-  if (domain.endsWith(".com")) {
-    score += 1;
-  }
-
-  return score;
 }
 
 async function recordUnhideEvent(hostname, selector) {
   const data = await storageGet(["unhideEvents"]);
   const unhideEvents = data.unhideEvents || [];
-  unhideEvents.unshift({
-    hostname,
-    selector,
-    at: Date.now(),
-  });
+  unhideEvents.unshift({ hostname, selector, at: Date.now() });
   await storageSet({ unhideEvents: unhideEvents.slice(0, 200) });
 }
 
-function parseHostname(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      return null;
-    }
-    return parsed.hostname.toLowerCase();
-  } catch (error) {
-    return null;
-  }
+// Pomodoro adapter. State transitions are computed by the domain core;
+// this part only handles storage, the alarm and the notification.
+
+async function pomodoroTransition(transition) {
+  const existing = (await storageGet(["pomodoroState"])).pomodoroState || null;
+  const newState = transition(existing);
+  await storageSet({ pomodoroState: newState });
+  syncPomodoroAlarm(newState);
+  return newState;
 }
 
-function shouldTrackUrl(rawUrl) {
-  if (!rawUrl) {
-    return false;
-  }
-
-  if (rawUrl.startsWith(chrome.runtime.getURL("blocked.html"))) {
-    return false;
-  }
-
-  if (
-    rawUrl.startsWith("chrome://") ||
-    rawUrl.startsWith("edge://") ||
-    rawUrl.startsWith("about:") ||
-    rawUrl.startsWith("chrome-extension://")
-  ) {
-    return false;
-  }
-
-  return parseHostname(rawUrl) !== null;
+/** Aligns the wake up alarm with the state (running means alarm set). */
+function syncPomodoroAlarm(state) {
+  chrome.alarms.clear(POMODORO_ALARM);
+  if (!state || state.phase === "idle" || state.paused) return;
+  chrome.alarms.create(POMODORO_ALARM, {
+    when: Date.now() + pomodoro.remainingMs(state, Date.now()),
+  });
 }
 
-function normalizeSite(site) {
-  if (!site || typeof site !== "string") {
-    return "";
-  }
+/** Phase expiry: notify the user (localized) and end the timer. */
+async function handlePomodoroAlarm() {
+  const data = await storageGet(["pomodoroState", "uiLanguage"]);
+  const state = data.pomodoroState || {};
+  const lang = data.uiLanguage || "de";
 
-  let normalized = site.trim().toLowerCase();
-  if (!normalized) {
-    return "";
-  }
+  const isWork = state.phase === "work";
+  const titles = {
+    de: isWork ? "Pomodoro abgeschlossen! 🎉" : "Pause vorbei!",
+    en: isWork ? "Pomodoro done! 🎉" : "Break's over!",
+  };
+  const messages = {
+    de: isWork ? "Gut gemacht! Zeit für eine Pause." : "Bereit für die nächste Einheit?",
+    en: isWork ? "Great work! Time for a break." : "Ready for the next session?",
+  };
 
-  if (!normalized.includes("://")) {
-    normalized = `https://${normalized}`;
-  }
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "focus.svg",
+    title: titles[lang] || titles.de,
+    message: messages[lang] || messages.de,
+  });
 
-  try {
-    const url = new URL(normalized);
-    return url.hostname.replace(/^www\./, "");
-  } catch (error) {
-    return site.trim().toLowerCase().replace(/^www\./, "").split("/")[0];
-  }
+  await storageSet({ pomodoroState: pomodoro.complete(state) });
 }
 
-function matchesBlockedHost(hostname, blockedEntry) {
-  const blocked = normalizeSite(blockedEntry);
-  if (!blocked) {
-    return false;
-  }
-
-  if (hostname === blocked) {
-    return true;
-  }
-
-  return hostname.endsWith(`.${blocked}`);
-}
+// Promise wrappers around the chrome APIs
 
 function sanitizeTrackerBase(base) {
   if (typeof base !== "string" || base.trim() === "") {
@@ -681,116 +483,5 @@ function getTab(tabId) {
       }
       resolve(tab);
     });
-  });
-}
-
-// ── Pomodoro ──────────────────────────────────────────────────────────────────
-
-const POMODORO_DEFAULTS = { work: 25, shortBreak: 5, longBreak: 15, longBreakAfter: 4 };
-
-async function pomodoroStart(phase, settings) {
-  const s = { ...POMODORO_DEFAULTS, ...(settings || {}) };
-  const durations = {
-    work: s.work * 60 * 1000,
-    "short-break": s.shortBreak * 60 * 1000,
-    "long-break": s.longBreak * 60 * 1000,
-  };
-  const duration = durations[phase] || durations.work;
-
-  const existing = (await storageGet(["pomodoroState"])).pomodoroState || {};
-  const session = phase === "work" ? ((existing.session || 0) % s.longBreakAfter) + 1 : (existing.session || 1);
-
-  const newState = {
-    phase: phase || "work",
-    startedAt: Date.now(),
-    duration,
-    paused: false,
-    pausedRemainingMs: 0,
-    session,
-    settings: s,
-  };
-
-  chrome.alarms.clear(POMODORO_ALARM);
-  chrome.alarms.create(POMODORO_ALARM, { when: Date.now() + duration });
-  await storageSet({ pomodoroState: newState });
-  return newState;
-}
-
-async function pomodoroStop() {
-  chrome.alarms.clear(POMODORO_ALARM);
-  const existing = (await storageGet(["pomodoroState"])).pomodoroState || {};
-  await storageSet({
-    pomodoroState: {
-      phase: "idle",
-      paused: false,
-      pausedRemainingMs: 0,
-      session: existing.session || 1,
-      settings: existing.settings || POMODORO_DEFAULTS,
-    },
-  });
-}
-
-async function pomodoroPause() {
-  const data = await storageGet(["pomodoroState"]);
-  const state = data.pomodoroState || {};
-  if (!state.phase || state.phase === "idle" || state.paused) return state;
-
-  const elapsed = Date.now() - state.startedAt;
-  const remaining = Math.max(0, state.duration - elapsed);
-
-  chrome.alarms.clear(POMODORO_ALARM);
-  const newState = { ...state, paused: true, pausedRemainingMs: remaining };
-  await storageSet({ pomodoroState: newState });
-  return newState;
-}
-
-async function pomodoroResume() {
-  const data = await storageGet(["pomodoroState"]);
-  const state = data.pomodoroState || {};
-  if (!state.paused || !state.pausedRemainingMs) return state;
-
-  const newState = {
-    ...state,
-    startedAt: Date.now() - (state.duration - state.pausedRemainingMs),
-    paused: false,
-    pausedRemainingMs: 0,
-  };
-
-  chrome.alarms.clear(POMODORO_ALARM);
-  chrome.alarms.create(POMODORO_ALARM, { when: Date.now() + state.pausedRemainingMs });
-  await storageSet({ pomodoroState: newState });
-  return newState;
-}
-
-async function handlePomodoroAlarm() {
-  const data = await storageGet(["pomodoroState", "uiLanguage"]);
-  const state = data.pomodoroState || {};
-  const lang = data.uiLanguage || "de";
-
-  const isWork = state.phase === "work";
-  const titles = {
-    de: isWork ? "Pomodoro abgeschlossen! 🎉" : "Pause vorbei!",
-    en: isWork ? "Pomodoro done! 🎉" : "Break's over!",
-  };
-  const messages = {
-    de: isWork ? "Gut gemacht! Zeit für eine Pause." : "Bereit für die nächste Einheit?",
-    en: isWork ? "Great work! Time for a break." : "Ready for the next session?",
-  };
-
-  chrome.notifications.create({
-    type: "basic",
-    iconUrl: "focus.svg",
-    title: titles[lang] || titles.de,
-    message: messages[lang] || messages.de,
-  });
-
-  // Mark as idle
-  await storageSet({
-    pomodoroState: {
-      ...state,
-      phase: "idle",
-      paused: false,
-      pausedRemainingMs: 0,
-    },
   });
 }

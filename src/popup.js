@@ -1,13 +1,12 @@
 /**
- * FocusMode Popup — entry point.
+ * FocusMode popup entry point.
  * Orchestrates initialization, data loading, and event wiring.
  * All heavy logic lives in src/ui/* and src/lib/*.
  */
 
 import { state } from "./state.js";
-import { storageGet } from "./lib/chrome.js";
 import { queryTabs } from "./lib/chrome.js";
-import { parseHostname } from "./lib/format.js";
+import { parseHostname } from "./core/site.js";
 import { refreshAllData } from "./data.js";
 
 import { initNav } from "./ui/nav.js";
@@ -20,7 +19,7 @@ import {
   initSettings, initSettingsEvents, renderSettings, renderTrackerChip,
 } from "./ui/settings.js";
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+// Boot
 
 document.addEventListener("DOMContentLoaded", async () => {
   // 1. Apply stored theme + language before anything renders
@@ -49,7 +48,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   }, 1000);
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// Helpers
 
 async function resolveCurrentTab() {
   const [tab] = await queryTabs({ active: true, currentWindow: true });

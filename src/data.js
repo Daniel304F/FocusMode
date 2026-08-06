@@ -1,14 +1,13 @@
 /**
  * Data loading: fetches extension data from the background service worker
- * and populates the shared state. Also computes extended stats.
- *
- * FIX: /api/stats/daily returns { ok, days, items: [{day, totalMs, sessions}] }
- *      Previous code was incorrectly reading r.date and r.total_ms.
+ * and fills the shared state. Calculation rules live in the domain core;
+ * this module only picks the data source and writes results into the state.
  */
 import { state } from "./state.js";
-import { storageGet } from "./lib/chrome.js";
-import { sendToRuntime } from "./lib/chrome.js";
-import { normalizeSites, normalizeHiddenEntries, toDateStr } from "./lib/format.js";
+import { storageGet, sendToRuntime } from "./lib/chrome.js";
+import { normalizeSites } from "./core/site.js";
+import { normalizeHiddenEntries } from "./core/hidden-elements.js";
+import { toDateStr, aggregateSessions, buildDailySeries } from "./core/statistics.js";
 
 export async function refreshAllData() {
   const res = await sendToRuntime({ action: "get_popup_data", hostname: state.currentHostname });
@@ -26,7 +25,7 @@ export async function refreshAllData() {
     state.trackedSiteCount = Number(d.trackedSiteCount ?? state.pageStatsTop.length);
     state.activeSession = d.activeSession || null;
   } else {
-    // Fallback: read directly from Chrome storage
+    // Fallback when the background worker is unreachable: read storage directly.
     const fb = await storageGet([
       "blockedSites", "hiddenElements", "favoriteSites",
       "siteRecommendations", "pageStats", "trackerApiBase",
@@ -49,82 +48,48 @@ export async function refreshAllData() {
   await loadPomodoroState();
 }
 
-// ── Extended stats (today / week / 7-day chart) ───────────────────────────────
+// Extended statistics: today, week, seven day series.
 
 async function computeExtendedStats() {
-  // Prefer SQLite server — only when user has enabled it and server is online
+  // Prefer the SQLite server, but only when enabled and reachable.
   if (state.sqliteEnabled && state.trackerStatus?.online) {
     try {
       const resp = await fetch(`${state.trackerApiBase}/api/stats/daily?days=7`);
       if (resp.ok) {
         const body = await resp.json();
-        // FIX: response is { ok, days, items: [{day, totalMs, sessions}] }
+        // Response shape: { ok, days, items: [{day, totalMs, sessions}] }
         const rows = body.items || [];
         const todayStr = toDateStr(new Date());
 
-        const rowMap = {};
+        const dayMap = {};
         let weekMs = 0;
         let todayMs = 0;
-
         for (const r of rows) {
-          const ms = Number(r.totalMs || 0); // FIX: was r.total_ms (wrong)
-          rowMap[r.day] = ms;               // FIX: was r.date (wrong)
+          const ms = Number(r.totalMs || 0);
+          dayMap[r.day] = ms;
           weekMs += ms;
           if (r.day === todayStr) todayMs = ms;
         }
 
         state.todayMs = todayMs;
         state.weekMs = weekMs;
-        state.dailyStats = buildDailyArray(rowMap);
+        state.dailyStats = buildDailySeries(dayMap);
         return;
       }
-    } catch (_) {
-      // fall through to local fallback
+    } catch {
+      // Server unreachable, fall through to the local calculation.
     }
   }
 
-  // Fallback: compute from local recentSessions (capped at 200)
+  // Local calculation from the capped session history.
   const stored = await storageGet(["recentSessions"]);
-  const sessions = stored.recentSessions || [];
-
-  const todayStart = new Date();
-  todayStart.setHours(0, 0, 0, 0);
-  const todayStartMs = todayStart.getTime();
-  const weekStartMs = todayStartMs - 6 * 24 * 60 * 60 * 1000;
-
-  let todayMs = 0;
-  let weekMs = 0;
-  const dayMap = {};
-
-  for (const s of sessions) {
-    const ts = Number(s.startedAt || 0);
-    const dur = Number(s.durationMs || 0);
-    if (!ts || !dur) continue;
-    if (ts >= todayStartMs) todayMs += dur;
-    if (ts >= weekStartMs) {
-      weekMs += dur;
-      const key = toDateStr(new Date(ts));
-      dayMap[key] = (dayMap[key] || 0) + dur;
-    }
-  }
-
+  const { todayMs, weekMs, dayMap } = aggregateSessions(stored.recentSessions || []);
   state.todayMs = todayMs;
   state.weekMs = weekMs;
-  state.dailyStats = buildDailyArray(dayMap);
+  state.dailyStats = buildDailySeries(dayMap);
 }
 
-function buildDailyArray(dayMap) {
-  const DAY_NAMES = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
-  const result = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
-    const key = toDateStr(d);
-    result.push({ label: i === 0 ? "Heute" : DAY_NAMES[d.getDay()], totalMs: dayMap[key] || 0, isToday: i === 0 });
-  }
-  return result;
-}
-
-// ── Pomodoro state ────────────────────────────────────────────────────────────
+// Pomodoro state
 
 export async function loadPomodoroState() {
   const stored = await storageGet(["pomodoroState"]);

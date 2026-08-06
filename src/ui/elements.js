@@ -1,7 +1,8 @@
-/** Element-hider tab: renders hidden elements for the active domain. */
+/** Elements tab: manages the hidden elements of the active domain. */
 import { state } from "../state.js";
 import { storageGet, storageSet, sendToTab } from "../lib/chrome.js";
-import { escapeHtml, normalizeHiddenEntries } from "../lib/format.js";
+import { escapeHtml } from "../lib/format.js";
+import { removeHiddenEntry } from "../core/hidden-elements.js";
 import { refreshAllData } from "../data.js";
 
 export function renderHiddenElements() {
@@ -52,11 +53,9 @@ async function sendToTabAndClose(action) {
 
 async function unhide(entry) {
   if (!state.currentHostname || !entry) return;
+  // Removal (by id, falling back to the selector) is computed by the core.
   const { hiddenElements = {} } = await storageGet(["hiddenElements"]);
-  const list = normalizeHiddenEntries(hiddenElements[state.currentHostname] || []);
-  const filtered = list.filter((item) =>
-    entry.id ? item.id !== entry.id : item.selector !== entry.selector
-  );
+  const filtered = removeHiddenEntry(hiddenElements[state.currentHostname] || [], entry);
   if (filtered.length === 0) delete hiddenElements[state.currentHostname];
   else hiddenElements[state.currentHostname] = filtered;
   await storageSet({ hiddenElements });

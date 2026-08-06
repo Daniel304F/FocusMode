@@ -1,10 +1,13 @@
-/** Recommendations tab. */
+/**
+ * Recommendations tab: shows the recommended sites with direct follow up
+ * actions (block, favorite).
+ */
 import { state } from "../state.js";
-import { escapeHtml, normalizeSite } from "../lib/format.js";
-import { sendToRuntime } from "../lib/chrome.js";
+import { escapeHtml } from "../lib/format.js";
+import { normalizeSite } from "../core/site.js";
+import { toggleSite } from "../core/blocklist.js";
+import { sendToRuntime, storageGet, storageSet } from "../lib/chrome.js";
 import { addBlocked } from "./blocker.js";
-import { storageGet, storageSet } from "../lib/chrome.js";
-import { normalizeSites } from "../lib/format.js";
 import { refreshAllData } from "../data.js";
 
 export function renderRecommendations() {
@@ -52,10 +55,9 @@ export function initRecsEvents() {
 }
 
 async function toggleFav(site) {
-  const n = normalizeSite(site);
+  // The toggle logic lives in the domain core.
   const { favoriteSites = [] } = await storageGet(["favoriteSites"]);
-  const list = normalizeSites(favoriteSites);
-  const newList = list.includes(n) ? list.filter((s) => s !== n) : [...list, n];
+  const newList = toggleSite(favoriteSites, site);
   await storageSet({ favoriteSites: newList });
 
   state.favoriteSites = newList;

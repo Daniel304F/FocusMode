@@ -1,11 +1,17 @@
 /**
- * Blocker tab: renders blocked-sites list and manages the autocomplete input.
+ * Blocker tab: list of blocked sites and the autocomplete input. Domain
+ * rules come from src/core; this module only handles DOM, events and
+ * persistence.
  */
 import { state } from "../state.js";
-import { storageGet, storageSet, sendToRuntime } from "../lib/chrome.js";
-import { normalizeSite, normalizeSites, escapeHtml, highlightMatch } from "../lib/format.js";
+import { storageGet, storageSet } from "../lib/chrome.js";
+import { normalizeSite } from "../core/site.js";
+import { addSite, removeSite, toggleSite } from "../core/blocklist.js";
+import { rankSuggestions } from "../core/suggestions.js";
+import { escapeHtml, highlightMatch } from "../lib/format.js";
 import { refreshAllData } from "../data.js";
 
+// Static top list serving as the base of the autocomplete.
 const STATIC_SUGGESTIONS = [
   "youtube.com","facebook.com","instagram.com","x.com","twitter.com","reddit.com",
   "tiktok.com","linkedin.com","netflix.com","twitch.tv","pinterest.com","amazon.com",
@@ -30,7 +36,7 @@ const STATIC_SUGGESTIONS = [
 let acState = { index: -1, options: [] };
 let _flashSite = null;
 
-// ── Render ────────────────────────────────────────────────────────────────────
+// Rendering
 
 export function renderBlockedSites() {
   const list = document.getElementById("blockList");
@@ -63,7 +69,7 @@ export function renderBlockedSites() {
   _flashSite = null;
 }
 
-// ── Autocomplete ──────────────────────────────────────────────────────────────
+// Autocomplete
 
 export function initBlockerEvents() {
   const input = document.getElementById("siteInput");
@@ -79,9 +85,20 @@ export function initBlockerEvents() {
 function onInputChange() {
   const q = document.getElementById("siteInput").value.trim().toLowerCase();
   if (!q) { closeAc(); return; }
-  acState.options = buildOptions(q).slice(0, 12);
+  acState.options = rankSuggestions(q, suggestionSources());
   acState.index = -1;
   renderAc();
+}
+
+/** Sources with base scores: favorites above visited above blocked above top list. */
+function suggestionSources() {
+  return [
+    { domains: STATIC_SUGGESTIONS, label: "Top", baseScore: 10 },
+    { domains: state.blockedSites, label: "Geblockt", baseScore: 40 },
+    { domains: state.favoriteSites, label: "Favorit", baseScore: 60 },
+    { domains: state.pageStatsTop.map((r) => r.hostname), label: "Besucht", baseScore: 50 },
+    { domains: (state.recommendations?.items || []).map((r) => r.domain), label: "Empfehlung", baseScore: 35 },
+  ];
 }
 
 function onInputKeyDown(e) {
@@ -104,25 +121,6 @@ function onInputKeyDown(e) {
     acState.index = (acState.index - 1 + acState.options.length) % acState.options.length;
     renderAc();
   }
-}
-
-function buildOptions(query) {
-  const map = new Map();
-  const add = (domain, source, base) => {
-    const n = normalizeSite(domain);
-    if (!n) return;
-    const text = n.toLowerCase();
-    if (!text.includes(query)) return;
-    let score = base + (text.startsWith(query) ? 100 : 55) + Math.max(0, 20 - Math.abs(text.length - query.length));
-    const ex = map.get(n);
-    if (!ex || score > ex.score) map.set(n, { domain: n, source, score });
-  };
-  STATIC_SUGGESTIONS.forEach((s) => add(s, "Top", 10));
-  state.blockedSites.forEach((s) => add(s, "Geblockt", 40));
-  state.favoriteSites.forEach((s) => add(s, "Favorit", 60));
-  state.pageStatsTop.forEach((r) => add(r.hostname, "Besucht", 50));
-  (state.recommendations?.items || []).forEach((r) => add(r.domain, "Empfehlung", 35));
-  return [...map.values()].sort((a, b) => b.score - a.score);
 }
 
 function renderAc() {
@@ -156,7 +154,7 @@ function closeAc(target) {
   box.remove();
 }
 
-// ── Data mutations ────────────────────────────────────────────────────────────
+// Data mutations
 
 async function addFromInput() {
   const input = document.getElementById("siteInput");
@@ -177,21 +175,17 @@ async function addFromInput() {
 
 export async function addBlocked(site) {
   const n = normalizeSite(site);
-  if (!n) return;
-  if (state.blockedSites.includes(n)) return;
+  if (!n || state.blockedSites.includes(n)) return;
 
-  // Optimistic: update state + render synchronously before any async work
+  // Optimistic update: change state and rerender before any async work.
   state.blockedSites = [...state.blockedSites, n];
   _flashSite = n;
   renderBlockedSites();
 
-  // Persist
+  // The domain core keeps the persisted list free of duplicates.
   const { blockedSites = [] } = await storageGet(["blockedSites"]);
-  const list = normalizeSites(blockedSites);
-  if (!list.includes(n)) list.push(n);
-  await storageSet({ blockedSites: list });
+  await storageSet({ blockedSites: addSite(blockedSites, n) });
 
-  // Reconcile
   await refreshAllData();
   renderBlockedSites();
 }
@@ -203,8 +197,7 @@ async function removeBlocked(site) {
   renderBlockedSites();
 
   const { blockedSites = [] } = await storageGet(["blockedSites"]);
-  const newList = normalizeSites(blockedSites).filter((s) => s !== n);
-  await storageSet({ blockedSites: newList });
+  await storageSet({ blockedSites: removeSite(blockedSites, n) });
 
   await refreshAllData();
   renderBlockedSites();
@@ -219,15 +212,13 @@ async function toggleFavorite(site) {
   renderBlockedSites();
 
   const { favoriteSites = [] } = await storageGet(["favoriteSites"]);
-  const list = normalizeSites(favoriteSites);
-  const newList = list.includes(n) ? list.filter((s) => s !== n) : [...list, n];
-  await storageSet({ favoriteSites: newList });
+  await storageSet({ favoriteSites: toggleSite(favoriteSites, n) });
 
   await refreshAllData();
   renderBlockedSites();
 }
 
-// ── UI helpers ────────────────────────────────────────────────────────────────
+// UI helpers
 
 function setBtnBusy(btn, busy) {
   if (!btn) return;

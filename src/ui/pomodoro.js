@@ -5,12 +5,13 @@
 import { state } from "../state.js";
 import { sendToRuntime, storageGet, storageSet } from "../lib/chrome.js";
 import { formatCountdown } from "../lib/format.js";
+import { remainingMs, sanitizeSettings } from "../core/pomodoro.js";
 import { t } from "../lib/i18n.js";
 import { loadPomodoroState } from "../data.js";
 
 let countdownTimer = null;
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// Public API
 
 export function initPomodoroEvents() {
   document.getElementById("pomo-start")?.addEventListener("click", onStart);
@@ -37,8 +38,8 @@ export function renderPomodoro() {
   const p = state.pomodoro;
   const lang = state.uiLanguage;
 
-  // ── Countdown ──
-  const remaining = getRemainingMs(p);
+  // Countdown; the remaining time is computed by the domain core.
+  const remaining = remainingMs(p, Date.now());
   const cdEl = document.getElementById("pomo-countdown");
   if (cdEl) cdEl.textContent = formatCountdown(remaining);
 
@@ -95,18 +96,17 @@ export function renderPomodoro() {
   // Stop tick when idle or timer reaches zero
   if (isIdle || remaining <= 0) {
     if (!isIdle) {
-      // Countdown hit zero — reload state from storage in case BG already updated it
+      // Countdown hit zero: reload from storage in case the background already updated it.
       loadPomodoroState().then(() => renderPomodoro());
     }
     stopCountdownTick();
   }
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// Handlers
 
 async function onStart() {
   const p = state.pomodoro;
-  const isPaused = !p.paused === false && p.phase !== "idle";
 
   let res;
   if (p.paused) {
@@ -151,12 +151,13 @@ function selectPhase(phase) {
 }
 
 async function saveSettings() {
-  const work = clampInt(document.getElementById("pomo-work-min")?.value, 1, 120, 25);
-  const shortBreak = clampInt(document.getElementById("pomo-short-min")?.value, 1, 60, 5);
-  const longBreak = clampInt(document.getElementById("pomo-long-min")?.value, 1, 120, 15);
-  const longBreakAfter = clampInt(document.getElementById("pomo-after-n")?.value, 1, 10, 4);
-
-  const settings = { work, shortBreak, longBreak, longBreakAfter };
+  // Limits and fallback values are enforced by the domain core.
+  const settings = sanitizeSettings({
+    work: document.getElementById("pomo-work-min")?.value,
+    shortBreak: document.getElementById("pomo-short-min")?.value,
+    longBreak: document.getElementById("pomo-long-min")?.value,
+    longBreakAfter: document.getElementById("pomo-after-n")?.value,
+  });
   state.pomodoro.settings = settings;
 
   // Persist settings within pomodoroState
@@ -168,16 +169,7 @@ async function saveSettings() {
   if (btn) { btn.textContent = "Gespeichert"; setTimeout(() => { btn.textContent = "Speichern"; }, 1500); }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function getRemainingMs(p) {
-  if (!p || p.phase === "idle") {
-    const s = p?.settings || {};
-    return (s.work ?? 25) * 60 * 1000;
-  }
-  if (p.paused) return p.pausedRemainingMs || 0;
-  return Math.max(0, p.duration - (Date.now() - p.startedAt));
-}
+// Helpers
 
 function _selectedPhase() {
   const active = document.querySelector(".pomo-phase-btn.active");
@@ -198,9 +190,4 @@ function _updateRing(p, remainingMs) {
   const circumference = 2 * Math.PI * r;
   circle.style.strokeDasharray = `${circumference}`;
   circle.style.strokeDashoffset = `${circumference * (1 - frac)}`;
-}
-
-function clampInt(raw, min, max, fallback) {
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
 }

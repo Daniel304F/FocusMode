@@ -9,7 +9,7 @@ import { formatDuration } from "../lib/format.js";
 import { applyLanguage, t } from "../lib/i18n.js";
 import { refreshAllData } from "../data.js";
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+// Init
 
 export async function initSettings() {
   const stored = await storageGet([
@@ -131,7 +131,7 @@ export function renderTrackerChip() {
     : "SQLite: offline";
 }
 
-// ── SQLite ────────────────────────────────────────────────────────────────────
+// SQLite
 
 async function toggleSqlite(enabled) {
   state.sqliteEnabled = enabled;
@@ -150,7 +150,7 @@ async function toggleSqlite(enabled) {
   renderTrackerChip();
 }
 
-// ── Theme ─────────────────────────────────────────────────────────────────────
+// Theme
 
 function toggleTheme(isDark) {
   const theme = isDark ? "dark" : "light";
@@ -165,7 +165,7 @@ function applyTheme(theme) {
   if (toggle) toggle.checked = theme === "dark";
 }
 
-// ── Language ──────────────────────────────────────────────────────────────────
+// Language
 
 async function setLanguage(lang) {
   state.uiLanguage = lang;
@@ -173,7 +173,7 @@ async function setLanguage(lang) {
   await storageSet({ uiLanguage: lang });
 }
 
-// ── Server ────────────────────────────────────────────────────────────────────
+// Server
 
 async function saveTrackerUrl() {
   const value = (document.getElementById("trackerUrlInput")?.value || "").trim();
@@ -212,7 +212,7 @@ async function reconnectTracker() {
   setTimeout(() => { if (statusEl) statusEl.textContent = ""; }, 3000);
 }
 
-// ── LLM ───────────────────────────────────────────────────────────────────────
+// LLM
 
 function _applyProviderVisibility(provider) {
   const customFields = document.getElementById("llmCustomFields");
